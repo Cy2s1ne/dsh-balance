@@ -1,0 +1,6 @@
+# 本插件作为 profile bundle 的插入声明。
+# 注意：`name` 必须是完整的 npm 包名（含作用域），Cordis 用它来 import 模块，
+# 与 package.json 的 name 以及 client.js 里 __ModuleLoader__ 的 id 三者必须完全一致。
+- insert:
+    - id: dsh-balance
+      name: '@cy2s1ne/dsh-balance'
