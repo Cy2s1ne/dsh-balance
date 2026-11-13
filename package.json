@@ -1,10 +1,10 @@
 {
   "name": "@cy2s1ne/dsh-balance",
-  "version": "0.2.0",
-  "description": "DSH 插件：在输入框工具行实时显示 DeepSeek 账户余额（充值余额 + 赠送额度）与当前峰谷计费时段，点击展开明细与用量/充值入口。",
+  "version": "0.3.0",
+  "description": "DSH 插件：在输入框工具行实时显示当前模型所属 DeepSeek 账户的余额与峰谷计费时段（支持平台账号与 API Key 路由），点击展开明细与用量/充值入口。",
   "type": "module",
   "scripts": {
-    "test": "node --test test/pricing.test.mjs"
+    "test": "node --test test/pricing.test.mjs test/host-balance.test.mjs"
   },
   "main": "index.js",
   "exports": {
@@ -29,7 +29,9 @@
     "account",
     "peak",
     "offpeak",
-    "pricing"
+    "pricing",
+    "provider",
+    "multi-account"
   ],
   "license": "MIT",
   "author": "Cy2s1ne",

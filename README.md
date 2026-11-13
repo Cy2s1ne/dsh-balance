@@ -1,19 +1,38 @@
 # @cy2s1ne/dsh-balance
 
-DSH 插件：在**输入框工具行（模型选择器旁）**实时显示 DeepSeek 账户余额与当前峰谷计费时段。
+DSH 插件：在**输入框工具行（模型选择器旁）**实时显示**当前模型所属 DeepSeek 账户**的余额与峰谷计费时段。
 
 ## 功能
 
 - 胶囊上显示主钱包余额（人民币优先），左侧状态灯显示当前 **DeepSeek 峰谷计费时段**：
   绿色 = 低谷价，琥珀 = 高峰价；胶囊内另有「低谷 / 高峰」文字标签。
+- 余额**跟随当前会话选中的模型 provider**：在「DeepSeek 账号」和「DeepSeek（API Key）」
+  之间切换时，胶囊会自动改用对应账户的余额。
 - 点击展开明细面板：
+  - 当前账户名
   - 当前计费时段、下次切换时间与倒计时
-  - 充值余额（各币种）
-  - 赠送额度（若平台有下发）
+  - 总余额 / 充值余额 / 赠送额度（按平台返回）
   - 用量明细 / 去充值 入口
   - 最近更新时间
 - 每 20 秒自动刷新；标签页重新可见时立即补一次；打开面板时强制刷新。
-- 未登录、服务缺失、查询失败都会降级成可读提示，不会让输入框报错。
+- 未登录、未配置 API Key、服务缺失、查询失败都会降级成可读提示，不会让输入框报错。
+
+## 多账户与模型切换
+
+胶囊会跟随**当前会话选中的模型所属 provider** 自动切换数据源，不需要手动选账号：
+
+| 模型选择器中的组 | provider id | 余额来源 |
+| --- | --- | --- |
+| DeepSeek 账号 | `deepseek-account` | DSH 平台登录账号（`ctx.deepseekAccount`） |
+| DeepSeek（API Key） | `deepseek-official` | 凭据 `DEEPSEEK_API_KEY` 对应的账户 |
+
+- API Key 路由的余额由宿主端调用 `GET https://api.deepseek.com/user/balance` 查询；
+  密钥只在宿主侧读取，**不会**进入浏览器响应或日志。
+- 切换模型/账号后，胶囊会立即重新拉取一次，不用等 20 秒轮询。
+- **第三方 / 自定义 pi-ai provider** 没有统一的余额接口，胶囊会显示「余额不可用」——
+  这是提供商能力限制，不是插件故障。
+- API Key 路由目前固定读取 `DEEPSEEK_API_KEY` 这个凭据引用。如果把它改成了别的名字，
+  插件读不到；保持默认引用即可。
 
 ## 峰谷时段指示灯
 
@@ -46,21 +65,28 @@ DSH 插件：在**输入框工具行（模型选择器旁）**实时显示 DeepS
 
 ```
 浏览器余额胶囊
-  └─ GET /api/dsh-balance        （本插件宿主端注册的只读路由，仅回环可访问）
-       └─ ctx.deepseekAccount.getState() / getBalance()
-            └─ DeepSeek 平台账户接口
+  └─ GET /api/dsh-balance?provider=<当前模型 provider>
+       ├─ deepseek-account
+       │    └─ ctx.deepseekAccount.getState() / getBalance()
+       │         └─ DeepSeek 平台账户接口
+       └─ deepseek-official
+            └─ ctx.credentials.resolve('DEEPSEEK_API_KEY')
+                 └─ GET https://api.deepseek.com/user/balance
 ```
 
-宿主端带 15 秒缓存与单飞合并，避免浏览器轮询被放大到平台接口上；上游查询另有 10 秒超时保护。
+宿主端按 provider 分别做 15 秒缓存与单飞合并，避免浏览器轮询被放大到上游接口上；
+上游查询另有 10 秒超时保护。
 
 ## 前置条件（重要）
 
-本插件读取的是 **DSH 内置 `deepseekAccount` 服务**的账户数据，因此要求：
+余额数据源取决于当前选中的模型：
 
-> 已在 DSH 中**登录 DeepSeek 账号**（平台会话）。
+- 选 **DeepSeek 账号**：需要已在 DSH 中登录 DeepSeek 账号（平台会话）。
+- 选 **DeepSeek（API Key）**：需要在「设置 → 模型 → DeepSeek」中配置 API 密钥
+  （默认凭据引用为 `DEEPSEEK_API_KEY`）。
 
-只配置了 `DEEPSEEK_API_KEY`、但没有在 DSH 里登录账号的用户，胶囊会显示「余额未登录」——
-这是预期行为，不是故障。
+只配置了 API Key、没有登录平台账号时，选 API Key 路由仍能看到该账户余额；选账号路由
+会显示「余额未登录」，这是预期行为。
 
 ## 安装
 
@@ -99,7 +125,8 @@ npm test
 ```
 
 峰谷判定是纯时钟逻辑，测试直接从 `client.js` 的 pricing region 提取后验证工作日、周末、
-节假日边界与下次切换点，不依赖浏览器或余额接口。
+节假日边界与下次切换点；宿主端 `/user/balance` 的字段映射也有独立测试。两者都不依赖
+浏览器或真实余额接口。
 
 ## 说明
 
@@ -108,6 +135,8 @@ npm test
 - 该路由未走 DSH 的令牌鉴权，仅靠回环限制——与既有同类插件（如 dsh-mcp-manager）姿态一致。
   若要收紧，可改为经 `ctx.connection.authenticatedUrl` 访问。
 - 余额查询属于外部网络请求，首次加载可能有短暂延迟，胶囊会先显示「余额 …」。
+- API Key 余额查询固定访问 `https://api.deepseek.com/user/balance`；如果模型路由改到了
+  代理或自建端点，余额可能查不到，但这不影响模型调用本身。
 
 ## 许可
 

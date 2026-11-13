@@ -20,6 +20,9 @@ window.__ModuleLoader__.load({
 
     var API = '/api/dsh-balance'
     var POLL_MS = 20000
+    // apply() 时捕获客户端根 ctx，用来按当前会话读取模型选择。
+    var clientCtx = null
+    var DEFAULT_PROVIDER = 'deepseek-account'
 
     // 客户端样式：前缀 db- 避免与 shell / 其他插件冲突；
     // 颜色一律走 --dsw-alias-* 主题变量并带浅色回退，明暗自适应。
@@ -62,6 +65,7 @@ window.__ModuleLoader__.load({
       '.db-price-val{font-weight:600}',
       '.db-price-val[data-price="offpeak"]{color:var(--dsw-alias-state-success-primary,#0f9d6e)}',
       '.db-price-val[data-price="peak"]{color:var(--dsw-alias-state-warn-primary,#b26a00)}',
+      '.db-account{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.db-switch{display:flex;flex-direction:column;align-items:flex-end;gap:1px}',
       '.db-switch-when{font-weight:600}',
       '.db-switch-in{font-size:10px;font-weight:400;',
@@ -94,6 +98,32 @@ window.__ModuleLoader__.load({
         if (wallets[i] && wallets[i].currency === 'CNY') return wallets[i]
       }
       return wallets[0]
+    }
+
+    // 宿主返回的 provider.id 对应的显示名；宿主通常已带回 name。
+    function providerNameOf(id) {
+      if (id === 'deepseek-official') return 'DeepSeek API Key'
+      if (id === 'deepseek-account') return 'DeepSeek 账号'
+      return id || '未知账户'
+    }
+
+    // 订阅 modelDirectories 的会话 store；没有 store 时返回 null。
+    function useSnapshotStore(store) {
+      var pair = React.useState(store ? store.getSnapshot() : null)
+      var value = pair[0]
+      var setValue = pair[1]
+      React.useEffect(function () {
+        if (!store) {
+          setValue(null)
+          return
+        }
+        setValue(store.getSnapshot())
+        var unsubscribe = store.subscribe(function () { setValue(store.getSnapshot()) })
+        return function () {
+          if (typeof unsubscribe === 'function') unsubscribe()
+        }
+      }, [store])
+      return value
     }
 
     // ── DeepSeek 峰谷定价 ──────────────────────────────────────────────────
@@ -213,10 +243,12 @@ window.__ModuleLoader__.load({
     // #endregion pricing
 
     // 读取一次余额；任何失败都折成 { ok:false, reason } 形态，不抛错。
-    function fetchBalance(force) {
+    function fetchBalance(force, provider) {
       var tz = new Date().getTimezoneOffset() * -60 // 换算成「东八区为 +28800」的秒偏移
       var locale = (navigator && navigator.language) || 'zh-CN'
-      var url = API + '?locale=' + encodeURIComponent(locale) + '&tz=' + tz + (force ? '&force=1' : '')
+      var pid = provider || DEFAULT_PROVIDER
+      var url = API + '?locale=' + encodeURIComponent(locale) + '&tz=' + tz +
+        '&provider=' + encodeURIComponent(pid) + (force ? '&force=1' : '')
       return fetch(url, { headers: { accept: 'application/json' } })
         .then(function (res) {
           return res.json().then(function (body) {
@@ -230,7 +262,45 @@ window.__ModuleLoader__.load({
     }
 
     // 余额胶囊本体。
-    function BalanceBadge() {
+    function BalanceBadge(props) {
+      props = props || {}
+      var sessionId = props.sessionId
+      // 兜底：少数 slot 场景拿不到 sessionId 时，取当前主会话。
+      if (!sessionId && clientCtx && typeof clientCtx.get === 'function') {
+        var uiSession = clientCtx.get('uiSession')
+        if (uiSession && uiSession.current && typeof uiSession.current.getSnapshot === 'function') {
+          var currentBinding = uiSession.current.getSnapshot()
+          if (currentBinding && currentBinding.props && typeof currentBinding.props.sessionId === 'string') {
+            sessionId = currentBinding.props.sessionId
+          }
+        }
+      }
+      // 会话级 slot 会注入 sessionId；据此读取当前会话的模型选择。
+      var directory = null
+      if (sessionId && clientCtx && typeof clientCtx.get === 'function') {
+        var modelDirectories = clientCtx.get('modelDirectories')
+        if (modelDirectories && typeof modelDirectories.directoryFor === 'function') {
+          try {
+            directory = modelDirectories.directoryFor(sessionId)
+          } catch (error) {
+            directory = null
+          }
+        }
+      }
+      var directoryState = useSnapshotStore(directory ? directory.store : null)
+      var selection = directoryState && directoryState.current ? directoryState.current : null
+      var providerId = selection && typeof selection.provider === 'string' ? selection.provider : DEFAULT_PROVIDER
+
+      // 未登录 / 未配置 / 不支持余额查询属于可解释的降级，不算错误。
+      function phaseOf(data) {
+        if (data.ok) return 'ready'
+        if (data.reason === 'signed-out' || data.reason === 'not-available' ||
+            data.reason === 'no-credential' || data.reason === 'unsupported-provider') {
+          return 'empty'
+        }
+        return 'error'
+      }
+
       var statePair = React.useState({ phase: 'loading', data: null })
       var state = statePair[0]
       var setState = statePair[1]
@@ -251,15 +321,15 @@ window.__ModuleLoader__.load({
         var alive = true
 
         function load(force) {
-          return fetchBalance(force).then(function (data) {
+          return fetchBalance(force, providerId).then(function (data) {
             if (!alive) return
-            var phase = data.ok ? 'ready' : 'empty'
-            if (!data.ok && data.reason !== 'signed-out' && data.reason !== 'not-available') phase = 'error'
-            setState({ phase: phase, data: data })
+            setState({ phase: phaseOf(data), data: data })
           })
         }
 
-        load(false)
+        // provider 变化时先清掉上一个账户的余额，避免短暂显示错账户的数字。
+        setState({ phase: 'loading', data: null })
+        load(true)
         var timer = setInterval(function () { load(false) }, POLL_MS)
         // 隐藏的标签页不必继续轮询；重新可见时立刻补一次。
         function onVisible() { if (!document.hidden) load(false) }
@@ -270,7 +340,7 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
           document.removeEventListener('visibilitychange', onVisible)
         }
-      }, [])
+      }, [providerId])
 
       React.useEffect(function () {
         var timer = setInterval(function () { setNow(Date.now()) }, 30000)
@@ -283,7 +353,14 @@ window.__ModuleLoader__.load({
       }, [])
 
       var data = state.data || {}
-      var wallet = data.ok ? primaryWallet(data.wallets) : null
+      var totalWallets = data.ok && Array.isArray(data.totalWallets) && data.totalWallets.length > 0
+        ? data.totalWallets
+        : null
+      var wallet = data.ok ? primaryWallet(totalWallets || data.wallets) : null
+      var provider = data.provider && typeof data.provider === 'object'
+        ? data.provider
+        : { id: providerId, name: providerNameOf(providerId) }
+      var providerLabel = provider.name || providerNameOf(provider.id || providerId)
 
       // 当前峰谷时段：纯本地时钟计算，不依赖余额查询结果。
       var price = pricePeriodAt(nowMs)
@@ -296,14 +373,20 @@ window.__ModuleLoader__.load({
       if (state.phase === 'loading') label = '余额 …'
       else if (state.phase === 'ready' && wallet) label = symbolOf(wallet.currency) + formatAmount(wallet.balance)
       else if (data.reason === 'signed-out') label = '余额未登录'
+      else if (data.reason === 'no-credential') label = '余额未配置'
       else if (data.reason === 'not-available') label = '余额不可用'
+      else if (data.reason === 'unsupported-provider') label = '余额不可用'
       else label = '余额 --'
 
       // 明细面板内容。
       var rows = []
 
-      // 面板顶部：当前峰谷时段与下次切换，始终展示（不依赖余额是否读取成功）。
+      // 面板顶部：当前账户、峰谷时段与下次切换，始终展示。
       var priceRows = [
+        React.createElement('div', { className: 'db-row', key: 'paccount' },
+          React.createElement('span', { className: 'db-k' }, '账户'),
+          React.createElement('span', { className: 'db-v db-account' }, providerLabel)
+        ),
         React.createElement('div', { className: 'db-row', key: 'pnow' },
           React.createElement('span', { className: 'db-k' }, '当前计费'),
           React.createElement('span', { className: 'db-v db-price-val', 'data-price': isPeak ? 'peak' : 'offpeak' },
@@ -322,10 +405,21 @@ window.__ModuleLoader__.load({
         ),
         React.createElement('div', { className: 'db-note', key: 'prule' },
           '高峰：北京时间工作日 9:00–12:00、14:00–18:00；周末及法定节假日全天低谷。'),
+        data.available === false
+          ? React.createElement('div', { className: 'db-note', key: 'pavail' }, '账户余额不足，API 调用可能失败。')
+          : null,
       ]
       rows.push(React.createElement('div', { className: 'db-sec db-price-sec', key: 'price' }, priceRows))
 
       if (state.phase === 'ready') {
+        if (totalWallets) {
+          for (var t = 0; t < totalWallets.length; t++) {
+            rows.push(React.createElement('div', { className: 'db-row', key: 't' + t },
+              React.createElement('span', { className: 'db-k' }, totalWallets[t].currency === 'USD' ? '总余额 (USD)' : '总余额 (CNY)'),
+              React.createElement('span', { className: 'db-v' }, symbolOf(totalWallets[t].currency) + formatAmount(totalWallets[t].balance))
+            ))
+          }
+        }
         var wallets = Array.isArray(data.wallets) ? data.wallets : []
         for (var i = 0; i < wallets.length; i++) {
           rows.push(React.createElement('div', { className: 'db-row', key: 'w' + i },
@@ -349,6 +443,12 @@ window.__ModuleLoader__.load({
         }
       } else if (state.phase === 'loading') {
         rows.push(React.createElement('div', { className: 'db-note', key: 'n' }, '正在读取余额…'))
+      } else if (data.reason === 'no-credential') {
+        rows.push(React.createElement('div', { className: 'db-note', key: 'n' },
+          '当前模型使用 DeepSeek API Key，但没有配置 DEEPSEEK_API_KEY。请在「设置 → 模型 → DeepSeek」中填入 API 密钥。'))
+      } else if (data.reason === 'unsupported-provider') {
+        rows.push(React.createElement('div', { className: 'db-note', key: 'n' },
+          '当前模型提供商「' + providerLabel + '」没有可查询的余额接口。余额胶囊目前支持 DeepSeek 账号和 DeepSeek API Key，第三方提供商暂不支持。'))
       } else if (data.reason === 'signed-out') {
         rows.push(React.createElement('div', { className: 'db-note', key: 'n' },
           '当前未登录 DeepSeek 账号。请在「设置 → 模型」中登录后即可看到实时余额。'))
@@ -397,15 +497,13 @@ window.__ModuleLoader__.load({
             bottom: above ? (window.innerHeight - rect.top + 8) + 'px' : 'auto',
           })
         }
-        fetchBalance(true).then(function (d) {
-          var phase = d.ok ? 'ready' : 'empty'
-          if (!d.ok && d.reason !== 'signed-out' && d.reason !== 'not-available') phase = 'error'
-          setState({ phase: phase, data: d })
+        fetchBalance(true, providerId).then(function (d) {
+          setState({ phase: phaseOf(d), data: d })
         })
       }
 
-      // 悬停提示：把颜色语义与下次切换一起说清楚。
-      var title = 'DeepSeek 账户余额 · 当前' + priceName +
+      // 悬停提示：把账户、颜色语义与下次切换一起说清楚。
+      var title = providerLabel + ' · 当前' + priceName +
         (nextSwitchAt ? '，' + formatSwitchTime(nextSwitchAt, nowMs) + ' 转' + (isPeak ? '低谷价' : '高峰价') : '') +
         ' · 点击查看明细'
 
@@ -434,6 +532,7 @@ window.__ModuleLoader__.load({
 
     // 插件入口：宿主在客户端运行时装配好 ctx 后调用。
     function apply(ctx) {
+      clientCtx = ctx
       var disposers = []
       try {
         // 样式每次 apply 都刷新：热更新（HMR）只会重新执行 apply，若沿用旧 <style>
